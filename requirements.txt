@@ -1,0 +1,11 @@
+groq==0.11.0
+mcp==1.0.0
+prompt_toolkit==3.0.47
+rich==13.8.1
+chromadb==0.5.5
+watchdog==5.0.2
+tree-sitter==0.23.0
+tree-sitter-python==0.23.1
+python-dotenv==1.0.1
+anyio>=4.6.0
+pydantic==2.8.2
