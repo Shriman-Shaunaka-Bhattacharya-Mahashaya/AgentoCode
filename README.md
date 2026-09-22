@@ -1,80 +1,113 @@
-# Autonomous Codebase Guardian (CLI Edition)
+# 🛡️ AgentoCode
 
-A powerful, terminal-based AI agent designed to interact with, explore, and safely modify your codebase. Powered by **Groq (Llama 3.1)**, **Model Context Protocol (MCP)**, and **Tree-sitter AST Chunking**, this guardian understands the semantic structure of your code and executes tasks securely within a sandboxed environment.
+AgentoCode is a fully autonomous, CLI-based AI agent designed to act as your local codebase guardian and senior developer. It does not just chat about your code; it possesses full contextual memory, semantically understands your file structure, natively edits files, and executes terminal commands to test its own fixes within a secure sandbox.
 
-## 🌟 Key Features
+Built by marrying local **Retrieval-Augmented Generation (RAG)** for memory with the **Model Context Protocol (MCP)** for execution, and wrapped in a beautiful terminal interface.
 
-1. **Interactive Terminal Interface**: Built with `prompt_toolkit` and `rich`, providing a beautiful, chat-like REPL with multi-line input, history, and markdown rendering.
-2. **AST-Aware Semantic Memory (RAG)**: Uses `tree-sitter-python` to parse code into logical chunks (classes/functions) rather than arbitrary text splits, preserving code logic. Stored locally in `ChromaDB`.
-3. **Real-Time Watchdog Syncing**: Automatically listens for file changes in the background and performs delta-indexing, purging old ghost chunks and updating the vector database on the fly.
-4. **Decoupled MCP Architecture**: The LLM reasoning loop (`agent.py`) communicates with a secure tool-execution subprocess (`server.py`) using the standard Model Context Protocol (v2) over stdio.
-5. **Strict Directory Sandboxing**: Prevents the LLM from reading, writing, or executing commands outside of the explicitly allowed workspace directory.
-6. **Automatic Error Recovery**: If the LLM hallucinates malformed JSON or a tool crashes, the Python stack trace is fed back into the prompt, allowing the agent to self-correct in the next reasoning step.
+---
 
-## 🛠 Architecture
+## ✨ Key Features
 
-```mermaid
-graph TD
-    A[CLI Frontend cli.py] -->|chat_history| B(ReAct Agent agent.py)
-    A -->|Directory Path| C(Watchdog Daemon rag.py)
-    B <-->|Groq API| D{LLM: Llama-3.1-70B}
-    B -->|stdio_client| E(MCP Server server.py)
-    E -->|rag_search| F(Vector Memory rag.py)
-    E -->|read/write/run| H[Local File System]
-    C -->|File modifications| F
-    F <-->|SQLite/ChromaDB| G[(.chroma_db)]
+- **Semantic AST Chunking:** Uses `tree-sitter` to parse Python files by logical boundaries (Classes & Methods) rather than arbitrary character limits, tagging each chunk with rich metadata.
+- **Real-Time Watchdog Sync:** A background daemon silently monitors your selected workspace. If you (or the agent) edit a file, the vector database is instantly updated in real-time.
+- **Conversational Memory:** The ReAct agent retains full chronological context of your conversation across multiple prompts and tool calls.
+- **Directory Sandboxing:** The backend MCP server strictly enforces file access boundaries, preventing the LLM from reading, writing, or executing commands outside of the approved sandbox directory.
+- **Self-Healing LLM Loop:** If the LLM hallucinates a bad tool call or encounters an error, the agent catches the crash and feeds the error back to the LLM so it can learn and correct its mistake.
+- **Rich Interactive CLI:** A high-performance terminal UI using `prompt_toolkit` and `rich` for markdown rendering, syntax highlighting, and persistent chat history.
+
+---
+
+## 🛠️ Tech Stack & Components
+
+AgentoCode strictly decouples infrastructure into distinct layers to maintain security and performance:
+
+### 1. `cli.py` (The Interface)
+The entry point of the application. It replaces traditional web UIs with a fast, async terminal interface.
+- **Tech Used:** `prompt_toolkit` (for async user input and persistent `.cg_history`), `rich` (for markdown formatting and status spinners).
+- **Function:** Initializes the background watchdog, sets up the agent configuration (including the sandbox directory), and runs the chat loop.
+
+### 2. `agent.py` (The Brain)
+The reasoning engine running an asynchronous ReAct (Reason + Act) loop.
+- **Tech Used:** `groq` (AsyncGroq Client), `mcp` (ClientSession).
+- **Model:** `openai/gpt-oss-120b` via Groq for ultra-fast, intelligent tool usage with massive context and output budgets.
+- **Function:** Dynamically spawns the MCP server as a subprocess, retrieves available tools, maintains conversational memory, and orchestrates tool execution. If a tool fails, it captures the error and feeds it back into the loop.
+
+### 3. `server.py` (The Hands)
+The execution layer exposing local OS capabilities via the Model Context Protocol (MCP).
+- **Tech Used:** `mcp` (MCPServer).
+- **Function:** Exposes `read_file`, `write_file`, `run_command`, and `rag_search`. It intercepts every file request to ensure the absolute path strictly resides within the `--allowed-dir` sandbox.
+
+### 4. `rag.py` (The Memory)
+The vector database and file syncing engine.
+- **Tech Used:** `chromadb` (Vector storage), `tree-sitter` & `tree-sitter-python` (AST Parsing), `watchdog` (File monitoring).
+- **Function:** Scans the sandbox directory, parses Python files into logical AST chunks (classes/functions), and stores them in ChromaDB. The `watchdog` daemon runs in the background to automatically re-index modified files.
+
+---
+
+## ⚙️ Prerequisites
+
+* **Python 3.10+** (Developed on Python 3.14.x)
+* A free [Groq API Key](https://console.groq.com/) for lightning-fast inference.
+
+---
+
+## 🚀 Installation & Setup
+
+1. **Clone the repository:**
+```bash
+git clone https://github.com/YourUsername/AgentoCode.git
+cd AgentoCode
 ```
 
-## 🚀 Quick Start
-
-### 1. Prerequisites
-- Python 3.11+
-- A [Groq API Key](https://console.groq.com/keys)
-
-### 2. Installation
-Clone the repository and set up your virtual environment:
-
-```powershell
-# Create and activate virtual environment
+2. **Create and activate a virtual environment:**
+```bash
 python -m venv venv
-.\venv\Scripts\Activate.ps1  # On Windows
-# source venv/bin/activate   # On Linux/Mac
 
-# Install dependencies
+# On Windows:
+venv\Scripts\activate
+
+# On macOS/Linux:
+source venv/bin/activate
+```
+
+3. **Install the required dependencies:**
+All dependencies are strictly pinned in `requirements.txt`.
+```bash
 pip install -r requirements.txt
 ```
 
-### 3. Configuration
-Rename or create a `.env` file in the root directory and add your Groq API key:
+4. **Configure the environment:**
+Create a `.env` file in the root directory and add your Groq API key:
 ```env
 GROQ_API_KEY=gsk_your_api_key_here
 ```
 
-### 4. Running the Guardian
-Start the CLI, passing the directory you want the agent to monitor and guard (e.g., the current directory `.`):
-```powershell
-python cli.py --dir .
+---
+
+## 💻 How to Run & Use
+
+1. **Launch the CLI:**
+Start the agent by providing the directory you want it to guard. This directory becomes its strictly enforced sandbox.
+```bash
+python cli.py --dir ./sample_project
 ```
+> **Note on First-Time Indexing:** The very first time you run the agent, `chromadb` will download the default embedding model (`all-MiniLM-L6-v2`, ~80MB) in the background. Depending on your network speed, this may make the initial indexing phase appear frozen or take several minutes. Once cached, subsequent runs and real-time syncing will be instantaneous.
 
-## 💬 Usage & Slash Commands
+*(The background Watchdog will immediately index the folder into a hidden `.chroma_db` database and listen for real-time changes).*
 
-Once the CLI is running, simply type your requests in natural language. For example:
-- *"Explain how the AST chunking works in rag.py"*
-- *"Find where the ChromaDB collection is initialized"*
-- *"Run a command to check the current python version"*
+2. **Interact with the Agent:**
+Type your queries directly into the interactive prompt. Do not treat this like a standard ChatGPT prompt. Give it actionable tasks! 
+- *"How does the `SimpleCalculator` class handle division errors? Rewrite the method to return 0 instead of raising an error."*
+- *"Search the codebase for the RAG indexing logic. Read the file, change the chunk size from 4000 to 2500, save it, and then run `python rag.py` to test."*
 
-**Available Slash Commands:**
-- `/clear` - Clears the current conversation history to save tokens.
-- `/sync` - Forces a manual sync of the vector database (though it happens automatically on save).
-- `/exit` or `/quit` - Safely shuts down the agent and background daemons.
+3. **CLI Commands:**
+- `/exit` or `/quit` : Safely shutdown the background watchdog and exit the CLI.
+- `/clear` : Clear the agent's conversational memory (useful if the context window gets too large).
+- `/sync` : Reminder that memory is synced automatically on file save.
 
-## 📂 Project Structure
+---
 
-- `cli.py`: The main entry point. Handles the REPL, rich formatting, and user interaction.
-- `agent.py`: Contains the `CodebaseGuardianAgent` class. Manages the Groq ReAct loop and MCP client connection.
-- `server.py`: The FastMCP server. Exposes sandboxed file system capabilities to the agent.
-- `rag.py`: The memory engine. Handles Tree-sitter AST parsing, ChromaDB operations, and the Watchdog observer.
-- `.cg_history`: A hidden file created automatically to store your command line prompt history for the session.
+## ⚠️ Security Notice
 
-## 🛡 Security Note
-The Guardian implements basic directory sandboxing by resolving all paths against the `--dir` argument. While this prevents accidental modification of files outside the workspace, it is highly recommended to review the agent's actions and commit your work frequently when using autonomous file-writing tools.
+This agent has access to a terminal execution tool (`run_command`) and file overwrite tools (`write_file`). 
+While it features path-based sandboxing to restrict access to the directory you explicitly select via `--dir`, it is still executing terminal commands on your local OS. **Do not select root directories or critical system folders as your sandbox.** Use it strictly within isolated project workspaces.

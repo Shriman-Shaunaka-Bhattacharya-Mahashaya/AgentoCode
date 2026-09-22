@@ -4,3 +4,4 @@ venv/
 .cg_history
 __pycache__/
 *.pyc
+Difficulties.md

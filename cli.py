@@ -117,8 +117,4 @@ async def main():
             break
 
 if __name__ == "__main__":
-    # Ensure asyncio uses the correct event loop policy on Windows for subprocesses (MCP)
-    if sys.platform == 'win32':
-        asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
-    
     asyncio.run(main())

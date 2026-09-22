@@ -126,43 +126,43 @@ class RAGManager:
             
         return chunks
 
-    def purge_file_chunks(self, file_path: str):
+    def purge_file_chunks(self, rel_path: str):
         """Deletes all chunks associated with a file path from the vector store."""
         try:
-            self.collection.delete(where={"file_path": file_path})
+            self.collection.delete(where={"file_path": rel_path})
         except Exception as e:
-            print(f"Warning: Could not purge old chunks for {file_path}: {e}")
+            print(f"Warning: Could not purge old chunks for {rel_path}: {e}")
 
-    def index_file(self, file_path: str, timestamps: Dict[str, float]):
+    def index_file(self, abs_path: str, rel_path: str, timestamps: Dict[str, float]):
         """Indexes a single file if it has changed."""
-        if not file_path.endswith('.py'):
+        if not abs_path.endswith('.py'):
             return # Only indexing Python files for now MVP
             
-        if not os.path.exists(file_path):
-            self.purge_file_chunks(file_path)
-            timestamps.pop(file_path, None)
+        if not os.path.exists(abs_path):
+            self.purge_file_chunks(rel_path)
+            timestamps.pop(rel_path, None)
             return
 
-        mtime = os.path.getmtime(file_path)
-        if file_path in timestamps and timestamps[file_path] >= mtime:
+        mtime = os.path.getmtime(abs_path)
+        if rel_path in timestamps and timestamps[rel_path] >= mtime:
             return # File hasn't changed
             
         try:
-            with open(file_path, 'r', encoding='utf-8') as f:
+            with open(abs_path, 'r', encoding='utf-8') as f:
                 content = f.read()
                 
             # Delta index: remove old chunks first
-            self.purge_file_chunks(file_path)
+            self.purge_file_chunks(rel_path)
             
-            chunks = self.parse_ast_chunks(file_path, content)
+            chunks = self.parse_ast_chunks(rel_path, content)
             
             if chunks:
-                ids = [f"{file_path}_{i}" for i in range(len(chunks))]
+                ids = [f"{rel_path}_{i}" for i in range(len(chunks))]
                 documents = [c.content for c in chunks]
                 metadatas = [c.metadata for c in chunks]
                 # Ensure all metadata has file_path for purging later
                 for m in metadatas:
-                    m["file_path"] = file_path
+                    m["file_path"] = rel_path
                 
                 self.collection.add(
                     documents=documents,
@@ -170,9 +170,9 @@ class RAGManager:
                     ids=ids
                 )
             
-            timestamps[file_path] = mtime
+            timestamps[rel_path] = mtime
         except Exception as e:
-            print(f"Error indexing {file_path}: {e}")
+            print(f"Error indexing {rel_path}: {e}")
 
     def sync_codebase(self):
         """Performs a full pass over the directory to index new/changed files."""
@@ -183,8 +183,9 @@ class RAGManager:
             dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'venv']
             for file in files:
                 if file.endswith('.py'):
-                    file_path = os.path.join(root, file)
-                    self.index_file(file_path, timestamps)
+                    abs_path = os.path.join(root, file)
+                    rel_path = os.path.relpath(abs_path, self.directory).replace("\\", "/")
+                    self.index_file(abs_path, rel_path, timestamps)
                     
         self.save_timestamps(timestamps)
 
@@ -216,7 +217,8 @@ class CodebaseEventHandler(FileSystemEventHandler):
             return
         # Debounce/throttle logic could go here, but for now just sync immediately
         timestamps = self.manager.load_timestamps()
-        self.manager.index_file(file_path, timestamps)
+        rel_path = os.path.relpath(file_path, self.manager.directory).replace("\\", "/")
+        self.manager.index_file(file_path, rel_path, timestamps)
         self.manager.save_timestamps(timestamps)
 
     def on_modified(self, event):
@@ -231,8 +233,9 @@ class CodebaseEventHandler(FileSystemEventHandler):
         if not event.is_directory:
              # Purge deleted file
              timestamps = self.manager.load_timestamps()
-             self.manager.purge_file_chunks(event.src_path)
-             timestamps.pop(event.src_path, None)
+             rel_path = os.path.relpath(event.src_path, self.manager.directory).replace("\\", "/")
+             self.manager.purge_file_chunks(rel_path)
+             timestamps.pop(rel_path, None)
              self.manager.save_timestamps(timestamps)
 
 def start_watchdog(directory: str) -> Observer:

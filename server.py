@@ -1,7 +1,7 @@
 import os
 import argparse
 import subprocess
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from rag import RAGManager
 
 def parse_args():
@@ -12,8 +12,8 @@ def parse_args():
 args = parse_args()
 ALLOWED_DIR = os.path.abspath(args.allowed_dir)
 
-# Initialize FastMCP Server
-mcp = FastMCP("CodebaseGuardian")
+# Initialize MCP Server
+mcp = MCPServer("CodebaseGuardian")
 
 # Initialize RAGManager (this just sets paths, the Chroma DB is lazily loaded on search)
 rag_manager = RAGManager(ALLOWED_DIR)

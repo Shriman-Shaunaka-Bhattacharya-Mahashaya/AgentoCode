@@ -10,7 +10,7 @@ import traceback
 
 class AgentConfig(BaseModel):
     allowed_dir: str
-    model: str = "llama-3.1-70b-versatile" # Default model
+    model: str = "openai/gpt-oss-120b" # Default model
 
 class CodebaseGuardianAgent:
     def __init__(self, config: AgentConfig):
@@ -25,13 +25,13 @@ class CodebaseGuardianAgent:
         )
 
     def _convert_mcp_tool_to_openai_schema(self, mcp_tool) -> Dict[str, Any]:
-        """Converts an MCP tool definition to OpenAI's function calling schema."""
+        """Convert MCP Tool schema to OpenAI function calling schema."""
         return {
             "type": "function",
             "function": {
                 "name": mcp_tool.name,
-                "description": mcp_tool.description,
-                "parameters": mcp_tool.inputSchema
+                "description": mcp_tool.description or "",
+                "parameters": mcp_tool.input_schema
             }
         }
 
@@ -68,11 +68,12 @@ class CodebaseGuardianAgent:
 
     async def run(self, chat_history: List[Dict[str, Any]]) -> str:
         """Runs the ReAct loop for a single interaction round."""
+        import sys
         
         # Setup MCP Server connection
         server_script = os.path.join(os.path.dirname(os.path.abspath(__file__)), "server.py")
         server_params = StdioServerParameters(
-            command="python",
+            command=sys.executable,
             args=[server_script, "--allowed-dir", self.config.allowed_dir]
         )
         
@@ -94,7 +95,7 @@ class CodebaseGuardianAgent:
                         messages=messages,
                         tools=tools,
                         tool_choice="auto",
-                        max_tokens=4096
+                        max_tokens=65536
                     )
                     
                     message = response.choices[0].message
