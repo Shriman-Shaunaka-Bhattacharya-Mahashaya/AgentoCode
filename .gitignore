@@ -5,3 +5,39 @@ venv/
 __pycache__/
 *.pyc
 Difficulties.md
+changes.md
+problems.md
+.venv/
+knowledge_base/
+.guardian/
+.pytest_cache/
+
+# Local validation reports and exploratory scripts
+/dynamic_test_result.md
+/test_report.md
+/scratch_*.py
+
+# Local environment variants; example configuration can be committed
+.env.*
+!.env.example
+!.env.template
+
+# Python tooling and build output
+.mypy_cache/
+.ruff_cache/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+junit*.xml
+/build/
+/dist/
+*.egg-info/
+
+# Temporary output and operating-system metadata
+*.log
+*.tmp
+.DS_Store
+Thumbs.db

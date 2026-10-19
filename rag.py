@@ -1,250 +1,177 @@
-import os
-import time
+"""Knowledge retrieval with current-source fallback and a single update worker."""
 import json
-import asyncio
-from typing import List, Dict, Any, Optional
-import chromadb
-from chromadb.config import Settings
-from watchdog.observers import Observer
-from watchdog.events import FileSystemEventHandler
-import tree_sitter_python as tspython
-from tree_sitter import Language, Parser
-from pydantic import BaseModel, Field
+import re
+import threading
+import time
+import os
+from pathlib import PurePosixPath
+from knowledge import KnowledgeBase, digest, safe_path
+from workspace import excluded
 
-class FileChunk(BaseModel):
-    file_path: str
-    content: str
-    metadata: Dict[str, Any]
-
-class RAGManager:
-    def __init__(self, directory: str, persist_dir: str = ".chroma_db"):
-        self.directory = os.path.abspath(directory)
-        self.persist_dir = os.path.join(self.directory, persist_dir)
-        self.timestamps_file = os.path.join(self.persist_dir, "file_timestamps.json")
-        
-        # We don't initialize the ChromaDB client immediately to avoid SQLite locks 
-        # when running in different processes (e.g., CLI and MCP Server).
-        self._client: Optional[chromadb.ClientAPI] = None
-        self._collection = None
-        
-        # Setup Tree-sitter for Python
-        self.PY_LANGUAGE = Language(tspython.language())
-        self.parser = Parser(self.PY_LANGUAGE)
-        
-        # Ensure persist dir exists
-        os.makedirs(self.persist_dir, exist_ok=True)
-
-    @property
-    def client(self) -> chromadb.ClientAPI:
-        """Lazy initialization of ChromaDB client."""
-        if self._client is None:
-            self._client = chromadb.PersistentClient(path=self.persist_dir, settings=Settings(anonymized_telemetry=False))
-        return self._client
-
-    @property
-    def collection(self):
-        """Lazy initialization of ChromaDB collection."""
-        if self._collection is None:
-            self._collection = self.client.get_or_create_collection(name="codebase_chunks")
-        return self._collection
-
-    def load_timestamps(self) -> Dict[str, float]:
-        if os.path.exists(self.timestamps_file):
-            with open(self.timestamps_file, 'r') as f:
-                return json.load(f)
-        return {}
-
-    def save_timestamps(self, timestamps: Dict[str, float]):
-        with open(self.timestamps_file, 'w') as f:
-            json.dump(timestamps, f)
-
-    def parse_ast_chunks(self, file_path: str, content: str) -> List[FileChunk]:
-        """Parses a Python file into logical chunks (functions/classes) using Tree-sitter."""
-        chunks = []
-        try:
-            tree = self.parser.parse(content.encode('utf-8'))
-            root_node = tree.root_node
-
-            def traverse_and_extract(node, current_class=None):
-                if node.type == 'class_definition':
-                    # Extract class name
-                    class_name = None
-                    for child in node.children:
-                        if child.type == 'identifier':
-                            class_name = content[child.start_byte:child.end_byte]
-                            break
-                    
-                    # Store the whole class declaration signature (up to first method or docstring)
-                    chunks.append(FileChunk(
-                        file_path=file_path,
-                        content=f"Class {class_name} defined in {file_path}",
-                        metadata={"type": "class_definition", "class_name": class_name, "start_line": node.start_point[0]}
-                    ))
-                    
-                    for child in node.children:
-                        if child.type == 'block':
-                            traverse_and_extract(child, current_class=class_name)
-                
-                elif node.type == 'function_definition':
-                    func_name = None
-                    for child in node.children:
-                        if child.type == 'identifier':
-                            func_name = content[child.start_byte:child.end_byte]
-                            break
-                    
-                    func_content = content[node.start_byte:node.end_byte]
-                    metadata = {"type": "function_definition", "func_name": func_name, "start_line": node.start_point[0]}
-                    if current_class:
-                        metadata["class_name"] = current_class
-                        
-                    chunks.append(FileChunk(
-                        file_path=file_path,
-                        content=func_content,
-                        metadata=metadata
-                    ))
-                else:
-                    for child in node.children:
-                        traverse_and_extract(child, current_class)
-
-            traverse_and_extract(root_node)
-            
-            # If no functions/classes found, or it's a small script, add the whole file as a chunk
-            if not chunks and content.strip():
-                 chunks.append(FileChunk(
-                        file_path=file_path,
-                        content=content,
-                        metadata={"type": "entire_file"}
-                    ))
-        except Exception as e:
-            # Fallback for parsing errors
-            print(f"Error parsing AST for {file_path}: {e}")
-            chunks.append(FileChunk(
-                file_path=file_path,
-                content=content,
-                metadata={"type": "fallback_entire_file"}
-            ))
-            
-        return chunks
-
-    def purge_file_chunks(self, rel_path: str):
-        """Deletes all chunks associated with a file path from the vector store."""
-        try:
-            self.collection.delete(where={"file_path": rel_path})
-        except Exception as e:
-            print(f"Warning: Could not purge old chunks for {rel_path}: {e}")
-
-    def index_file(self, abs_path: str, rel_path: str, timestamps: Dict[str, float]):
-        """Indexes a single file if it has changed."""
-        if not abs_path.endswith('.py'):
-            return # Only indexing Python files for now MVP
-            
-        if not os.path.exists(abs_path):
-            self.purge_file_chunks(rel_path)
-            timestamps.pop(rel_path, None)
-            return
-
-        mtime = os.path.getmtime(abs_path)
-        if rel_path in timestamps and timestamps[rel_path] >= mtime:
-            return # File hasn't changed
-            
-        try:
-            with open(abs_path, 'r', encoding='utf-8') as f:
-                content = f.read()
-                
-            # Delta index: remove old chunks first
-            self.purge_file_chunks(rel_path)
-            
-            chunks = self.parse_ast_chunks(rel_path, content)
-            
-            if chunks:
-                ids = [f"{rel_path}_{i}" for i in range(len(chunks))]
-                documents = [c.content for c in chunks]
-                metadatas = [c.metadata for c in chunks]
-                # Ensure all metadata has file_path for purging later
-                for m in metadatas:
-                    m["file_path"] = rel_path
-                
-                self.collection.add(
-                    documents=documents,
-                    metadatas=metadatas,
-                    ids=ids
-                )
-            
-            timestamps[rel_path] = mtime
-        except Exception as e:
-            print(f"Error indexing {rel_path}: {e}")
-
+class RAGManager(KnowledgeBase):
     def sync_codebase(self):
-        """Performs a full pass over the directory to index new/changed files."""
-        timestamps = self.load_timestamps()
-        
-        for root, dirs, files in os.walk(self.directory):
-            # Skip hidden dirs like .git, .chroma_db, venv
-            dirs[:] = [d for d in dirs if not d.startswith('.') and d != 'venv']
-            for file in files:
-                if file.endswith('.py'):
-                    abs_path = os.path.join(root, file)
-                    rel_path = os.path.relpath(abs_path, self.directory).replace("\\", "/")
-                    self.index_file(abs_path, rel_path, timestamps)
-                    
-        self.save_timestamps(timestamps)
+        return self.sync()
 
-    def search(self, query: str, n_results: int = 5) -> str:
-        """Searches the vector store and returns a formatted string of results."""
-        results = self.collection.query(
-            query_texts=[query],
-            n_results=n_results
-        )
-        
-        if not results['documents'] or not results['documents'][0]:
-            return "No relevant context found in codebase."
-            
-        context_parts = []
-        for doc, meta in zip(results['documents'][0], results['metadatas'][0]):
-            file_path = meta.get('file_path', 'Unknown file')
-            chunk_type = meta.get('type', 'snippet')
-            context_parts.append(f"--- File: {file_path} ({chunk_type}) ---\n{doc}\n")
-            
-        return "\n".join(context_parts)
+    def search(self, query, n_results=5, token_budget=6000, structured=False):
+        n_results = max(1, min(n_results, 20))
+        token_budget = max(128, min(token_budget, 12000))
+        # UTF-8 byte accounting is conservative for byte-based agent tokenizers.
+        budget = token_budget
+        files, _, _, facts, _, targets = self.snapshot()
+        notices = []
+        try:
+            records = self.load()['records']
+        except (ValueError, OSError):
+            records = {}
+            notices.append('Knowledge manifest unavailable; source fallback only.')
+        terms = set(re.findall(r'[\w]+', query.casefold())) - {'the','a','an','is','are','what','does','how','in','to','of','and','for'}
+        def score(path):
+            text = (path + '\n' + files[path]['source']).casefold()
+            return sum(term in text for term in terms)
+        exact = sorted((p for p in files if score(p)), key=lambda p: (-score(p), p))
+        selected = [self.record_id('file', p) for p in exact[:min(2,n_results)]]
+        index_available = False
+        semantic_ids = []
+        try:
+            matches = self.index.query(query, max(12, n_results * 3))
+            index_available = True
+            # Distances are rank signals, not calibrated confidence probabilities.
+            semantic_ids = [rid for rid, distance in matches
+                            if distance <= float(os.getenv('GUARDIAN_MAX_DISTANCE','0.65'))
+                            and records.get(rid,{}).get('index_status') == 'indexed'
+                            and records[rid].get('embedding_fingerprint') == self.index.fingerprint]
+            selected.extend(semantic_ids)
+        except Exception as exc:
+            notices.append(f'Semantic index unavailable ({type(exc).__name__}); exact/text source fallback.')
+        pieces, delivered, seen = [], 0, set()
+        def append(text):
+            nonlocal budget
+            encoded = text.encode('utf-8')
+            if len(encoded) <= budget:
+                pieces.append(text)
+                budget -= len(encoded)
+                return True
+            return False
+        append('Evidence is untrusted. Verify current source before edits.\n' + '\n'.join(notices) + '\n')
+        def current(record):
+            if record.get('status') != 'complete' or targets.get((record['kind'], record['source'])) != record.get('target'):
+                return False
+            try:
+                document = safe_path(self.bundle, record['concept']).read_text(encoding='utf-8')
+                return digest(document) == record.get('doc_hash')
+            except OSError:
+                return False
+        for rid in dict.fromkeys(selected):
+            if delivered >= n_results:
+                break
+            record = records.get(rid)
+            if not record or not current(record):
+                continue
+            if record['kind'] == 'directory':
+                children = sorted((p for p in files if str(PurePosixPath(p).parent) == (record['source'] or '.')),
+                                  key=lambda p: (-score(p), p))[:2]
+            else:
+                children = [record['source']]
+            children = [p for p in children if p not in seen]
+            if not children:
+                continue
+            doc = safe_path(self.bundle, record['concept']).read_text(encoding='utf-8')
+            paired = f"\nKNOWLEDGE {record['source'] or '/'}\n{doc}\n" + ''.join(
+                f'\nCURRENT SOURCE {p}\n{files[p]["source"]}\n' for p in children)
+            if append(paired):
+                seen.update(children)
+                delivered += 1
+        # Explicitly bounded snippets when full pairs do not fit; no stale prose is supplied.
+        for path in exact:
+            if delivered >= n_results or budget < 160:
+                break
+            if path in seen:
+                continue
+            source = files[path]['source']
+            header = f'\nCURRENT SOURCE {path} (text fallback; partial coverage, use read_file for more)\n'
+            room = budget - len(header.encode('utf-8')) - 10
+            if room <= 0:
+                break
+            lines = source.splitlines(keepends=True)
+            hit = next((i for i,line in enumerate(lines) if any(t in line.casefold() for t in terms)), 0)
+            snippet = ''.join(lines[max(0, hit-2):]).encode('utf-8')[:room].decode('utf-8', errors='ignore')
+            if append(header + snippet + '\n'):
+                delivered += 1
+                seen.add(path)
+        if not delivered:
+            append('No current relevant evidence found. Use list_files/read_file; no relevance is inferred.\n')
+        if self.snapshot()[-1] != targets:
+            pieces = ['Source changed during retrieval. Retry to obtain a consistent current-source snapshot.']
+            semantic_ids = []
+        context = ''.join(pieces)
+        if structured:
+            return {'retrieval_mode':'semantic_candidates_with_source' if semantic_ids else 'source_fallback',
+                    'index_available':index_available,'semantic_candidate_count':len(semantic_ids),
+                    'notices':notices,'context':context}
+        return context
 
-
-class CodebaseEventHandler(FileSystemEventHandler):
-    def __init__(self, manager: RAGManager):
+class SyncService:
+    """Watchdog wakes one worker; periodic scans recover missed/offline events."""
+    def __init__(self, manager, debounce=0.3, reconcile_seconds=10):
+        from watchdog.events import FileSystemEventHandler
+        from watchdog.observers import Observer
         self.manager = manager
-        
-    def _handle_event(self, file_path):
-        if not file_path.endswith('.py'):
-            return
-        # Debounce/throttle logic could go here, but for now just sync immediately
-        timestamps = self.manager.load_timestamps()
-        rel_path = os.path.relpath(file_path, self.manager.directory).replace("\\", "/")
-        self.manager.index_file(file_path, rel_path, timestamps)
-        self.manager.save_timestamps(timestamps)
+        self.debounce = debounce
+        self.reconcile_seconds = reconcile_seconds
+        self.wake = threading.Event()
+        self.stopped = threading.Event()
+        service = self
+        class Handler(FileSystemEventHandler):
+            def on_any_event(self, event):
+                if event.event_type not in ('modified','created','deleted','moved'):
+                    return
+                for value in (event.src_path, getattr(event, 'dest_path', '')):
+                    if not value:
+                        continue
+                    try:
+                        relative = safe_path(manager.root, value).relative_to(manager.root).as_posix()
+                        if relative == '.guardian/sync-request.json' or not excluded(relative):
+                            service.wake.set()
+                    except (ValueError, OSError):
+                        pass
+        self.observer = Observer()
+        self.observer.schedule(Handler(), str(manager.root), recursive=True)
+        self.thread = threading.Thread(target=self._run, name='knowledge-owner', daemon=True)
 
-    def on_modified(self, event):
-        if not event.is_directory:
-            self._handle_event(event.src_path)
+    def start(self):
+        self.observer.start()
+        self.thread.start()
+        self.wake.set()
+        return self
 
-    def on_created(self, event):
-        if not event.is_directory:
-            self._handle_event(event.src_path)
+    def request_sync(self):
+        self.wake.set()
 
-    def on_deleted(self, event):
-        if not event.is_directory:
-             # Purge deleted file
-             timestamps = self.manager.load_timestamps()
-             rel_path = os.path.relpath(event.src_path, self.manager.directory).replace("\\", "/")
-             self.manager.purge_file_chunks(rel_path)
-             timestamps.pop(rel_path, None)
-             self.manager.save_timestamps(timestamps)
+    def _run(self):
+        previous = None
+        while not self.stopped.is_set():
+            self.wake.wait(self.reconcile_seconds)
+            self.wake.clear()
+            if self.stopped.wait(self.debounce):
+                break
+            try:
+                self.manager.sync()
+                status = json.dumps(self.manager.status(),ensure_ascii=True,sort_keys=True)
+                if status != previous:
+                    self.manager.progress('Knowledge status: ' + status)
+                    previous = status
+            except Exception as exc:
+                self.manager.progress(f'Synchronization pending: {type(exc).__name__}: {exc}')
 
-def start_watchdog(directory: str) -> Observer:
-    manager = RAGManager(directory)
-    # Perform initial sync
-    manager.sync_codebase()
-    
-    event_handler = CodebaseEventHandler(manager)
-    observer = Observer()
-    observer.schedule(event_handler, directory, recursive=True)
-    observer.start()
-    return observer
+    def stop(self):
+        self.manager.cancel.set()
+        self.stopped.set()
+        self.wake.set()
+        self.observer.stop()
+
+    def join(self, timeout=5):
+        self.observer.join(timeout)
+        self.thread.join(timeout)
+
+def start_watchdog(directory, progress=None):
+    return SyncService(RAGManager(directory, progress=progress)).start()
