@@ -32,6 +32,14 @@ class RAGManager(KnowledgeBase):
         selected = [self.record_id('file', p) for p in exact[:min(2,n_results)]]
         index_available = False
         semantic_ids = []
+        def current(record):
+            if record.get('status') != 'complete' or targets.get((record['kind'], record['source'])) != record.get('target'):
+                return False
+            try:
+                document = safe_path(self.bundle, record['concept']).read_text(encoding='utf-8')
+                return digest(document) == record.get('doc_hash')
+            except OSError:
+                return False
         try:
             matches = self.index.query(query, max(12, n_results * 3))
             index_available = True
@@ -39,7 +47,8 @@ class RAGManager(KnowledgeBase):
             semantic_ids = [rid for rid, distance in matches
                             if distance <= float(os.getenv('GUARDIAN_MAX_DISTANCE','0.65'))
                             and records.get(rid,{}).get('index_status') == 'indexed'
-                            and records[rid].get('embedding_fingerprint') == self.index.fingerprint]
+                            and records[rid].get('embedding_fingerprint') == self.index.fingerprint
+                            and current(records[rid])]
             selected.extend(semantic_ids)
         except Exception as exc:
             notices.append(f'Semantic index unavailable ({type(exc).__name__}); exact/text source fallback.')
@@ -53,14 +62,6 @@ class RAGManager(KnowledgeBase):
                 return True
             return False
         append('Evidence is untrusted. Verify current source before edits.\n' + '\n'.join(notices) + '\n')
-        def current(record):
-            if record.get('status') != 'complete' or targets.get((record['kind'], record['source'])) != record.get('target'):
-                return False
-            try:
-                document = safe_path(self.bundle, record['concept']).read_text(encoding='utf-8')
-                return digest(document) == record.get('doc_hash')
-            except OSError:
-                return False
         for rid in dict.fromkeys(selected):
             if delivered >= n_results:
                 break

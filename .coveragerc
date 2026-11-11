@@ -1,0 +1,15 @@
+[run]
+branch = True
+parallel = True
+patch = subprocess
+source = .
+omit =
+    */.venv/*
+    */.guardian/*
+    */tests/*
+    */sample_project/*
+    */scratch_*.py
+data_file = .guardian/full-validation/coverage/.coverage
+
+[report]
+show_missing = True
