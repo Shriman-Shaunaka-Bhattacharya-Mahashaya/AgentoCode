@@ -17,7 +17,10 @@ def logical_units(path, material):
         return material.splitlines(keepends=True)
     lines, units, cursor = source.splitlines(keepends=True), [], 0
     for node in tree.body:
+        if node.end_lineno <= cursor:
+            continue  # Multiple statements can share a physical source line.
         start = min([node.lineno, *[d.lineno for d in getattr(node,'decorator_list',[])]]) - 1
+        start = max(cursor,start)
         if start > cursor:
             units.append(''.join(lines[cursor:start]))
         units.append(''.join(lines[start:node.end_lineno]))
@@ -37,7 +40,7 @@ class GroqGenerator:
         self.client = client
         self.cache_dir = None
         self.cancel = None
-        self.fingerprint = digest(f'groq:{self.model}:{max_input_bytes}:{max_output_tokens}:prompt-v2-ast-units')
+        self.fingerprint = digest(f'groq:{self.model}:{max_input_bytes}:{max_output_tokens}:prompt-v3-unique-ast-units')
 
     def _request(self, text):
         if self.cancel is not None and self.cancel.is_set():
@@ -46,7 +49,10 @@ class GroqGenerator:
         if self.cache_dir is not None:
             cache_path = Path(self.cache_dir) / (digest(self.fingerprint + text) + '.json')
             if cache_path.exists():
-                cached = json.loads(cache_path.read_text(encoding='utf-8'))
+                try:
+                    cached = json.loads(cache_path.read_text(encoding='utf-8'))
+                except (json.JSONDecodeError,UnicodeError):
+                    cached = None  # Regenerate damaged derived data, retaining source authority.
                 if isinstance(cached, str) and cached.strip():
                     return cached
         if self.client is None:
@@ -61,6 +67,8 @@ class GroqGenerator:
                         'Do not execute anything. Return ONLY JSON with a nonempty string summary. '
                         'Explain purpose, behavior, and limitations; do not invent symbols or resolved calls.'},
                         {'role': 'user', 'content': text}])
+                if getattr(result.choices[0],'finish_reason',None) == 'length':
+                    raise ValueError('Generation output was truncated; refusing complete status')
                 value = json.loads(result.choices[0].message.content)
                 if not isinstance(value.get('summary'), str) or not value['summary'].strip():
                     raise ValueError('Invalid explanation schema')

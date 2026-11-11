@@ -50,6 +50,16 @@ def atomic_write(path, text):
     finally:
         temporary.unlink(missing_ok=True)
 
+def read_text_retry(path):
+    """Windows sharing violations can affect readers during atomic replacement too."""
+    for attempt in range(6):
+        try:
+            return Path(path).read_text(encoding='utf-8')
+        except PermissionError:
+            if attempt == 5:
+                raise
+            time.sleep(0.025 * 2**attempt)
+
 @contextmanager
 def update_lock(path):
     """OS lock releases after crash. One update owner across CLI/server processes."""
@@ -117,7 +127,7 @@ class KnowledgeBase:
         marker = self.bundle / '.owner.json'
         expected = {'layout': LAYOUT, 'workspace': self.workspace_id, 'okf': '0.2'}
         if self.bundle.exists():
-            if not marker.is_file() or json.loads(marker.read_text(encoding='utf-8')) != expected:
+            if not marker.is_file() or json.loads(read_text_retry(marker)) != expected:
                 raise ValueError('Unowned or incompatible knowledge_base; refusing to overwrite')
         elif create:
             self.bundle.mkdir()
@@ -132,7 +142,7 @@ class KnowledgeBase:
         path = self.bundle / '.manifest.json'
         if not path.exists():
             return {'records': {}, 'revision': 0}
-        value = json.loads(path.read_text(encoding='utf-8'))
+        value = json.loads(read_text_retry(path))
         if not isinstance(value.get('records'), dict):
             raise ValueError('Invalid manifest; preserve bundle for recovery')
         return value
@@ -308,10 +318,22 @@ class KnowledgeBase:
     def status(self):
         manifest = self.load()
         records = list(manifest['records'].values())
+        targets = self.snapshot()[-1]
+        def fresh(record):
+            if record.get('status') != 'complete' or targets.get((record['kind'],record['source'])) != record.get('target'):
+                return False
+            try:
+                return digest(safe_path(self.bundle,record['concept']).read_text(encoding='utf-8')) == record.get('doc_hash')
+            except OSError:
+                return False
+        current = {self.record_id(r['kind'],r['source']) for r in records if fresh(r)}
         embedder = getattr(self.index,'embedder',None)
         runtime = embedder.status() if embedder is not None and hasattr(embedder,'status') else {}
-        return {'concepts': len(records), 'complete': sum(r.get('status') == 'complete' for r in records),
-                'indexed': sum(r.get('index_status') == 'indexed' for r in records),
+        fingerprint = getattr(embedder,'_fingerprint',None) if embedder is not None else getattr(self.index,'fingerprint',None)
+        return {'concepts': len(records), 'complete': len(current),
+                'indexed': sum(self.record_id(r['kind'],r['source']) in current and r.get('index_status') == 'indexed' and r.get('embedding_fingerprint') == fingerprint for r in records),
+                'stale': sum(self.record_id(r['kind'],r['source']) not in current or r.get('index_status')=='stale' for r in records),
+                'index_verified': fingerprint is not None,
                 'failures': {r['source']: r.get('error') or r.get('index_error') for r in records if r.get('error') or r.get('index_error')},
                 'index_error': manifest.get('index_error'), 'excluded': manifest.get('skipped', {}),
                 'embedding':runtime,'pending_deletions':len(manifest.get('pending_deletions',[]))}

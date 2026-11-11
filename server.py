@@ -22,7 +22,7 @@ def reserve_protocol_stream():
 _protocol_stdout = reserve_protocol_stream() if __name__ == '__main__' else None
 from pathlib import Path
 from workspace import safe_path, validate_agent_workspace, inventory, excluded
-from knowledge import atomic_write, digest
+from knowledge import atomic_write, digest, update_lock
 from rag import RAGManager, SyncService
 
 class WorkspaceTools:
@@ -50,12 +50,17 @@ class WorkspaceTools:
         lines = text.splitlines()[start_line-1:start_line-1+max(1,min(max_lines,200))]
         return '\n'.join(f'{i}: {line}' for i,line in enumerate(lines,start_line)).encode('utf-8')[:16000].decode('utf-8',errors='ignore')
 
-    def write_file(self, path: str, content: str) -> str:
-        """Replace a source file inside the selected workspace and queue knowledge refresh."""
+    def write_file(self, path: str, content: str, expected_sha256: str | None = None) -> str:
+        """Replace source and queue refresh; optional hash/missing guard rejects intervening edits."""
         if len(content.encode('utf-8')) > 512_000:
             raise ValueError('File exceeds write limit')
         target = self.path(path)
-        atomic_write(target, content)
+        with update_lock(self.manager.state/('write-'+digest(os.path.normcase(str(target)))+'.lock')):
+            if expected_sha256 is not None:
+                actual = digest(target.read_bytes()) if target.exists() else 'missing'
+                if actual != expected_sha256:
+                    raise ValueError('Write conflict: source changed since the assigned snapshot; inspect it before retrying')
+            atomic_write(target, content)
         # Persist notification for the owning worker; source hash checks invalidate evidence immediately.
         atomic_write(self.manager.state / 'sync-request.json', json.dumps({'path': str(target.relative_to(self.root))}))
         if self.service:

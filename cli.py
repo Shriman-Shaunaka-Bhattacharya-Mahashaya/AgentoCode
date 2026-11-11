@@ -18,17 +18,21 @@ console = Console()
 async def main():
     parser=argparse.ArgumentParser(description='AgentoCode CLI')
     parser.add_argument('--dir',required=True)
+    parser.add_argument('--workers',type=int,default=3,choices=range(1,7),help='Maximum concurrent delegated workers (default: 3)')
+    parser.add_argument('--single-agent',action='store_true',help='Disable worker delegation')
+    parser.add_argument('--worker-model',help='Optional Groq worker model; defaults to the coordinator model')
     args=parser.parse_args()
     target=str(validate_agent_workspace(args.dir))
     if not os.getenv('GROQ_API_KEY'):
         raise SystemExit('GROQ_API_KEY is missing from the environment or .env')
-    agent=CodebaseGuardianAgent(AgentConfig(allowed_dir=target))
+    agent=CodebaseGuardianAgent(AgentConfig(allowed_dir=target,max_workers=args.workers,
+        enable_delegation=not args.single_agent,worker_model=args.worker_model))
     session=PromptSession(history=FileHistory(str(Path(target)/'.cg_history')))
     history=[]
     console.print(f'AgentoCode workspace: {target}',markup=False)
     console.print('Starting the knowledge worker. Use /status for loading/indexing progress.')
     async with agent.connect(watch=True):
-        console.print('Commands: /status, /sync, /clear, /exit')
+        console.print('Commands: /status, /agents, /sync, /clear, /exit')
         while True:
             try:
                 value=(await session.prompt_async('\n> ')).strip()
@@ -45,6 +49,9 @@ async def main():
                     continue
                 if value.lower() == '/status':
                     console.print_json(await agent.workspace_tool('knowledge_status'))
+                    continue
+                if value.lower() == '/agents':
+                    console.print_json(json.dumps(agent.agent_status()))
                     continue
                 history.append({'role':'user','content':value})
                 try:

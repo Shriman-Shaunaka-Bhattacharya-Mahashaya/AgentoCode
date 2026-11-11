@@ -1,5 +1,5 @@
 """Shared inventory and tool boundary. Project input is never executed here."""
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 import hashlib
 import os
 import subprocess
@@ -17,6 +17,15 @@ def digest(value):
 
 def safe_path(root, relative):
     root = Path(root).resolve(strict=True)
+    raw = Path(relative)
+    if os.name == 'nt':
+        if raw.drive and not raw.is_absolute():
+            raise ValueError('Drive-relative paths are not supported')
+        for part in raw.parts:
+            if part in (raw.anchor,'.','..'):
+                continue
+            if ':' in part or part.rstrip(' .') != part or PureWindowsPath(part).is_reserved():
+                raise ValueError('Windows device, stream or ambiguous filename is not supported')
     candidate = (root / relative).resolve()
     if not candidate.is_relative_to(root):
         raise ValueError('Path is outside the selected workspace')
@@ -42,7 +51,7 @@ def validate_agent_workspace(root):
 
 def excluded(relative):
     parts = Path(relative).parts
-    return any(p in EXCLUDED or p.startswith('.') or p.lower() in SECRET_NAMES or
+    return any(p.casefold() in EXCLUDED or p.startswith('.') or p.lower() in SECRET_NAMES or
                p.lower().endswith(('.pem', '.key', '.p12', '.pfx')) for p in parts)
 
 def inventory(root, max_bytes=512_000):
@@ -77,6 +86,10 @@ def inventory(root, max_bytes=512_000):
         from pathspec import GitIgnoreSpec
         specs = {}
         for rel in candidates:
+            # Git never re-includes a descendant while its parent directory is excluded.
+            if any(rel.startswith(parent) for parent in ignored if parent.endswith('/')):
+                ignored.add(rel)
+                continue
             path = root / rel.rstrip('/')
             ignored_here = False
             # Use ordered source ancestors, with later negated rules overriding earlier ones.

@@ -21,7 +21,7 @@ class Profile:
     pooling: str = 'mean'
     overflow: str = 'reject'
     serializer: str = 'semantic-v1'
-    normalization: str = 'l2'
+    normalization: str = 'l2-scaled-v2'
     metric: str = 'cosine'
 
 def configured_profile():
@@ -40,10 +40,13 @@ def configured_profile():
 def normalized(vector, dimensions):
     if len(vector) != dimensions or any(not math.isfinite(v) for v in vector):
         raise ValueError('Invalid embedding width or nonfinite value')
-    norm = math.sqrt(sum(v*v for v in vector))
-    if not norm:
+    values = [float(v) for v in vector]
+    scale = max(abs(v) for v in values)
+    if not scale:
         raise ValueError('Zero embedding')
-    return [float(v/norm) for v in vector]
+    scaled = [v/scale for v in values]
+    norm = math.hypot(*scaled)
+    return [v/norm for v in scaled]
 
 class SentenceTransformersEmbedder:
     def __init__(self, profile=None, model_factory=None):
