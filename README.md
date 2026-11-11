@@ -2,7 +2,7 @@
 
 AgentoCode is an interactive Python agent for a selected project. A coordinator can delegate independent subtasks to multiple worker agents and combine their findings. Groq supplies the agent models and independent knowledge explanations. **Sentence Transformers runs the embedding model locally inside the persistent MCP server**, and Chroma stores one vector per completed knowledge concept.
 
-Validation on Windows includes **126 passing tests** (62.37 seconds, no failures or skips) and live CLI testing with Groq and Nomic on CPU. Combined automated/live coverage measured **95% of statements, 87% of branches, 93% overall**. Live checks covered concurrent editing workers, rate-limit recovery, source-driven vector replacement, deletion, cached restart and MCP stdout isolation. These results establish tested behavior, not general retrieval accuracy. Detailed run reports are local artifacts excluded from the repository.
+Validation on Windows includes **130 passing tests** (75.76 seconds, no failures or skips) under the CI test environment, plus earlier live CLI testing with Groq and Nomic on CPU. Earlier combined automated/live coverage measured **95% of statements, 87% of branches, 93% overall**. Live checks covered concurrent editing workers, rate-limit recovery, source-driven vector replacement, deletion, cached restart and MCP stdout isolation. These results establish tested behavior, not general retrieval accuracy. Detailed run reports are local artifacts excluded from the repository.
 
 ## Setup on Windows
 
@@ -145,6 +145,20 @@ python -m pip install -r requirements-dev.txt
 python -m pytest -q
 python sample_project/main.py
 ```
+
+### Automatic checks on GitHub
+
+[Tests workflow](.github/workflows/tests.yml) runs on every push and pull request, and can be started manually from the Actions tab. It targets Windows with Python 3.12, installs the pinned development dependencies, runs `pip check` and the entire regression/integration suite, and requires at least **90% combined statement/branch coverage**. Failed tests or insufficient coverage fail the job. Superseded runs on the same branch are cancelled.
+
+No Groq secret or embedding snapshot is needed for CI. Tests use deterministic model fixtures with real Chroma/MCP/Watchdog integrations. Dotenv loading and Hub downloads are disabled during tests; dependency installation still needs network access. Fresh-process CLI checks verify help, missing credentials and refusal to select the application's own workspace. An additional real-Chroma integration checks no-op reuse, stale-source refresh, restart, deletion and recreation under stable IDs.
+
+The local CI-equivalent run passed all **130 tests** with **92.78% overall coverage**, exceeding the 90% threshold. A hosted Actions run still needs to execute after this workflow is pushed.
+
+Each run retains `junit.xml` and `coverage.xml` in the `windows-python312-test-reports` artifact for 14 days, including available reports after a test failure. Application caches, logs and credentials are excluded from the upload. Reports are also ignored locally under `test-results/`.
+
+Checks run after GitHub receives a push. To prevent merging failing changes, configure the repository's branch protection/ruleset to require **Windows / Python 3.12**. That repository setting must be enabled separately. See [GitHub's Python CI guide](https://docs.github.com/en/actions/tutorials/build-and-test-code/python) for the Actions interface. Live Groq/Nomic evaluations remain separate from these deterministic checks.
+
+### Local coverage and validation limits
 
 For statement/branch coverage, including Python subprocesses:
 

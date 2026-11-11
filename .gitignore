@@ -32,6 +32,7 @@ knowledge_base/
 htmlcov/
 coverage.xml
 junit*.xml
+/test-results/
 /build/
 /dist/
 *.egg-info/
